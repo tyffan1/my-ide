@@ -7,8 +7,14 @@ dist-ssr/
 release/
 out/
 build/
+coverage-dist/
 
 # Electron packaging output
+dist-electron/
+electron-dist/
+app-dist/
+.electron/
+.electron-gyp/
 *.blockmap
 *.dmg
 *.exe
@@ -34,18 +40,25 @@ pids
 *.pid
 *.seed
 *.pid.lock
+*.db
+*.sqlite
+*.sqlite3
 
 # Coverage and test output
 coverage/
 .nyc_output/
 test-results/
 playwright-report/
+blob-report/
 
 # Caches
 .cache/
 .vite/
+node_modules/.vite/
 .eslintcache
+.stylelintcache
 *.tsbuildinfo
+*.vite-temp
 
 # Environment files
 .env
@@ -54,11 +67,15 @@ playwright-report/
 
 # Local-only files
 *.local
+*.tmp
+tmp/
+temp/
 
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
 .idea
+.fleet/
 *.suo
 *.ntvs*
 *.njsproj
