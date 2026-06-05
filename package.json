@@ -6,7 +6,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "electron:dev": "concurrently -k \"npm run dev -- --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && env -u ELECTRON_RUN_AS_NODE electron .\"",
+    "electron:start": "node scripts/electron-launch.mjs",
+    "electron:wait": "wait-on http://127.0.0.1:5173 && npm run electron:start",
+    "electron:dev": "concurrently -k \"npm run dev -- --host 127.0.0.1\" \"npm run electron:wait\"",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview"

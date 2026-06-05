@@ -1,9 +1,15 @@
 :root {
   --bg: #10131a;
+  --surface: #171b24;
+  --surface-2: #1b1f29;
+  --surface-3: #222733;
+  --menubar: #141820;
   --border: #2a303d;
   --text: #d7dde8;
   --muted: #8d97aa;
   --accent: #4ea1ff;
+  --sidebar-width: 260px;
+  --panel-height: 170px;
   --mono: 'Cascadia Code', 'JetBrains Mono', Consolas, monospace;
   --sans:
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI',

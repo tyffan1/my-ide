@@ -6,10 +6,13 @@ import {
   Bug,
   Check,
   ChevronDown,
+  ChevronRight,
   ChevronUp,
+  Folder,
   Code2,
   FileCode2,
   Files,
+  FolderOpen,
   GitBranch,
   PanelBottom,
   Play,
@@ -20,6 +23,17 @@ import {
   X,
 } from 'lucide-react'
 import './App.css'
+import { MenuBar } from './MenuBar'
+import { SettingsView } from './SettingsView'
+import { useSettings } from './settings/useSettings'
+import type { SettingsCategory } from './settings/types'
+import {
+  buildFileTree,
+  collectFolderPaths,
+  toWorkspaceFile,
+  workspaceLabel,
+  type FileTreeNode,
+} from './workspaceUtils'
 
 type WorkspaceFile = {
   id: string
@@ -42,59 +56,8 @@ type CursorPosition = {
   column: number
 }
 
-const initialFiles: WorkspaceFile[] = [
-  {
-    id: 'app',
-    name: 'App.tsx',
-    path: 'src/App.tsx',
-    language: 'typescript',
-    content: `import { createApp } from './runtime'
-
-const app = createApp({
-  name: 'My IDE',
-  theme: 'dark',
-})
-
-app.command('workbench.openFile', async () => {
-  console.log('Opening a file...')
-})
-
-app.start()
-`,
-  },
-  {
-    id: 'main',
-    name: 'main.ts',
-    path: 'src/main.ts',
-    language: 'typescript',
-    content: `export function boot() {
-  const root = document.querySelector('#root')
-
-  if (!root) {
-    throw new Error('Root element was not found')
-  }
-
-  root.textContent = 'IDE shell mounted'
-}
-`,
-  },
-  {
-    id: 'settings',
-    name: 'settings.json',
-    path: '.my-ide/settings.json',
-    language: 'json',
-    content: `{
-  "editor.fontSize": 14,
-  "editor.tabSize": 2,
-  "workbench.colorTheme": "Carbon"
-}
-`,
-  },
-]
-
 const initialOutput: OutputLine[] = [
-  { id: 1, kind: 'info', text: 'My IDE dev session started' },
-  { id: 2, kind: 'success', text: 'Renderer is connected to Electron' },
+  { id: 1, kind: 'info', text: 'My IDE session started' },
 ]
 
 const activityLabels: Record<ActivityView, string> = {
@@ -105,14 +68,29 @@ const activityLabels: Record<ActivityView, string> = {
   settings: 'Settings',
 }
 
+const settingsCategoryLabels: Record<SettingsCategory, string> = {
+  editor: 'Editor',
+  appearance: 'Appearance',
+  workbench: 'Workbench',
+  files: 'Files',
+}
+
 function App() {
   const editorRef = useRef<MonacoEditor.IStandaloneCodeEditor | null>(null)
-  const [files, setFiles] = useState(initialFiles)
-  const [openFileIds, setOpenFileIds] = useState(['app', 'main'])
-  const [activeFileId, setActiveFileId] = useState('app')
-  const [savedContent, setSavedContent] = useState<Record<string, string>>(
-    Object.fromEntries(initialFiles.map((file) => [file.id, file.content])),
-  )
+  const {
+    settings,
+    settingsCategory,
+    setSettingsCategory,
+    updateSetting,
+    resetSettings,
+    resetCategory,
+  } = useSettings()
+  const [files, setFiles] = useState<WorkspaceFile[]>([])
+  const [openFileIds, setOpenFileIds] = useState<string[]>([])
+  const [activeFileId, setActiveFileId] = useState<string | null>(null)
+  const [workspaceFolder, setWorkspaceFolder] = useState<string | null>(null)
+  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(() => new Set())
+  const [savedContent, setSavedContent] = useState<Record<string, string>>({})
   const [outputLines, setOutputLines] = useState(initialOutput)
   const [bottomPanel, setBottomPanel] = useState<BottomPanel>('terminal')
   const [activeView, setActiveView] = useState<ActivityView>('explorer')
@@ -122,19 +100,71 @@ function App() {
   const [isNotificationsVisible, setIsNotificationsVisible] = useState(false)
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false)
   const [isSplitEditor, setIsSplitEditor] = useState(false)
-  const [isMinimapEnabled, setIsMinimapEnabled] = useState(true)
-  const [isWordWrapEnabled, setIsWordWrapEnabled] = useState(true)
-  const [isAutoSaveEnabled, setIsAutoSaveEnabled] = useState(false)
-  const [fontSize, setFontSize] = useState(14)
   const [cursorPosition, setCursorPosition] = useState<CursorPosition>({
     line: 1,
     column: 1,
   })
 
-  const activeFile = files.find((file) => file.id === activeFileId) ?? files[0]
+  const hasNativeDialogs = Boolean(window.myIde?.openFile && window.myIde?.openFolder)
+  const hasNativeShell = Boolean(window.myIde)
+  const activeFile = activeFileId
+    ? files.find((file) => file.id === activeFileId) ?? null
+    : null
   const activeOpenFiles = openFileIds
     .map((id) => files.find((file) => file.id === id))
     .filter(Boolean) as WorkspaceFile[]
+  const hasOpenFiles = activeOpenFiles.length > 0
+  const isSettingsOpen = activeView === 'settings'
+  const workspaceName = workspaceLabel(workspaceFolder, hasNativeDialogs)
+
+  const editorOptions = useMemo(
+    () => ({
+      fontFamily: settings.editor.fontFamily,
+      fontSize: settings.editor.fontSize,
+      minimap: { enabled: settings.editor.minimap },
+      lineNumbers: settings.editor.lineNumbers ? ('on' as const) : ('off' as const),
+      padding: { top: 18, bottom: 18 },
+      smoothScrolling: settings.editor.smoothScrolling,
+      tabSize: settings.editor.tabSize,
+      wordWrap: settings.editor.wordWrap ? ('on' as const) : ('off' as const),
+      cursorBlinking: settings.editor.cursorBlinking,
+      bracketPairColorization: { enabled: settings.editor.bracketPairColorization },
+    }),
+    [settings.editor],
+  )
+
+  const workbenchClassName = [
+    'workbench',
+    hasOpenFiles && !isSettingsOpen ? '' : 'no-editor-tabs',
+  ]
+    .filter(Boolean)
+    .join(' ')
+
+  const workbenchGridRows = useMemo(() => {
+    const rows = ['42px']
+
+    if (hasOpenFiles && !isSettingsOpen) {
+      rows.push('36px')
+    }
+
+    rows.push('minmax(0, 1fr)')
+
+    if (settings.workbench.showBottomPanel) {
+      rows.push(`${settings.workbench.panelHeight}px`)
+    }
+
+    if (settings.workbench.showStatusBar) {
+      rows.push('24px')
+    }
+
+    return rows.join(' ')
+  }, [
+    hasOpenFiles,
+    isSettingsOpen,
+    settings.workbench.panelHeight,
+    settings.workbench.showBottomPanel,
+    settings.workbench.showStatusBar,
+  ])
 
   const dirtyFileIds = useMemo(
     () =>
@@ -150,6 +180,8 @@ function App() {
     () => files.filter((file) => dirtyFileIds.has(file.id)),
     [dirtyFileIds, files],
   )
+
+  const fileTree = useMemo(() => buildFileTree(files), [files])
 
   const searchResults = useMemo(() => {
     const query = searchQuery.trim().toLowerCase()
@@ -181,7 +213,7 @@ function App() {
     const messages = [
       `${openFileIds.length} tabs open`,
       isSplitEditor ? 'Split editor enabled' : 'Single editor mode',
-      isAutoSaveEnabled ? 'Auto save is on' : 'Auto save is off',
+      settings.files.autoSave ? 'Auto save is on' : 'Auto save is off',
     ]
 
     if (dirtyFiles.length > 0) {
@@ -189,7 +221,7 @@ function App() {
     }
 
     return messages
-  }, [dirtyFiles.length, isAutoSaveEnabled, isSplitEditor, openFileIds.length])
+  }, [dirtyFiles.length, isSplitEditor, openFileIds.length, settings.files.autoSave])
 
   const appendOutput = useCallback((kind: OutputLine['kind'], text: string) => {
     setOutputLines((lines) => [
@@ -197,6 +229,36 @@ function App() {
       { id: Date.now() + lines.length, kind, text },
     ])
   }, [])
+
+  const addWorkspaceFile = useCallback(
+    (file: { path: string; name: string; content: string }) => {
+      const workspaceFile = toWorkspaceFile(file)
+
+      setFiles((currentFiles) => {
+        const existingIndex = currentFiles.findIndex(
+          (candidate) => candidate.id === workspaceFile.id,
+        )
+
+        if (existingIndex === -1) {
+          return [...currentFiles, workspaceFile].sort((left, right) =>
+            left.path.localeCompare(right.path),
+          )
+        }
+
+        return currentFiles.map((candidate) =>
+          candidate.id === workspaceFile.id ? workspaceFile : candidate,
+        )
+      })
+
+      setSavedContent((content) => ({
+        ...content,
+        [workspaceFile.id]: workspaceFile.content,
+      }))
+
+      return workspaceFile.id
+    },
+    [],
+  )
 
   const openFile = useCallback(
     (fileId: string) => {
@@ -221,33 +283,102 @@ function App() {
         const nextIds = ids.filter((id) => id !== fileId)
 
         if (activeFileId === fileId) {
-          setActiveFileId(nextIds.at(-1) ?? files[0].id)
+          setActiveFileId(nextIds.at(-1) ?? null)
         }
 
-        return nextIds.length > 0 ? nextIds : [files[0].id]
+        return nextIds
       })
     },
-    [activeFileId, files],
+    [activeFileId],
   )
+
+  const closeAllFiles = useCallback(() => {
+    setOpenFileIds([])
+    setActiveFileId(null)
+    appendOutput('info', 'Closed all editors')
+  }, [appendOutput])
+
+  const openQuickOpen = useCallback(() => {
+    setIsQuickOpenVisible(true)
+    setIsNotificationsVisible(false)
+  }, [])
+
+  const openFileDialog = useCallback(async () => {
+    if (!window.myIde?.openFile) {
+      openQuickOpen()
+      return
+    }
+
+    const result = await window.myIde.openFile()
+
+    if (!result) {
+      return
+    }
+
+    const fileId = addWorkspaceFile(result)
+    setActiveFileId(fileId)
+    setOpenFileIds((ids) => (ids.includes(fileId) ? ids : [...ids, fileId]))
+    setIsQuickOpenVisible(false)
+    setQuickOpenQuery('')
+    appendOutput('info', `Opened ${result.path}`)
+  }, [addWorkspaceFile, appendOutput, openQuickOpen])
+
+  const openFolderDialog = useCallback(async () => {
+    if (!window.myIde?.openFolder) {
+      appendOutput('warning', 'Open Folder is available in the Electron app')
+      setActiveView('explorer')
+      setIsSidebarCollapsed(false)
+      return
+    }
+
+    const result = await window.myIde.openFolder()
+
+    if (!result) {
+      return
+    }
+
+    const nextFiles = result.files.map((file) => toWorkspaceFile(file))
+    const tree = buildFileTree(nextFiles)
+
+    setWorkspaceFolder(result.folderPath)
+    setFiles(nextFiles)
+    setSavedContent(
+      Object.fromEntries(nextFiles.map((file) => [file.id, file.content])),
+    )
+    setExpandedFolders(new Set(collectFolderPaths(tree)))
+    setOpenFileIds([])
+    setActiveFileId(null)
+    setActiveView('explorer')
+    setIsSidebarCollapsed(false)
+    appendOutput('success', `Opened folder: ${result.folderPath}`)
+  }, [appendOutput])
 
   const updateActiveFile = useCallback(
     (value: string | undefined) => {
+      if (!activeFileId) {
+        return
+      }
+
       setFiles((currentFiles) =>
         currentFiles.map((file) =>
-          file.id === activeFile.id ? { ...file, content: value ?? '' } : file,
+          file.id === activeFileId ? { ...file, content: value ?? '' } : file,
         ),
       )
     },
-    [activeFile.id],
+    [activeFileId],
   )
 
   const saveActiveFile = useCallback(() => {
+    if (!activeFile) {
+      return
+    }
+
     setSavedContent((content) => ({
       ...content,
       [activeFile.id]: activeFile.content,
     }))
     appendOutput('success', `Saved ${activeFile.path}`)
-  }, [activeFile.content, activeFile.id, activeFile.path, appendOutput])
+  }, [activeFile, appendOutput])
 
   const saveAllFiles = useCallback(() => {
     setSavedContent(Object.fromEntries(files.map((file) => [file.id, file.content])))
@@ -255,10 +386,15 @@ function App() {
   }, [appendOutput, dirtyFiles.length, files])
 
   const runActiveFile = useCallback(() => {
+    if (!activeFile) {
+      appendOutput('warning', 'No file is open')
+      return
+    }
+
     setBottomPanel('terminal')
     appendOutput('info', `Running ${activeFile.path}`)
     appendOutput('success', 'Process exited with code 0')
-  }, [activeFile.path, appendOutput])
+  }, [activeFile, appendOutput])
 
   const showProblems = useCallback(() => {
     setBottomPanel('problems')
@@ -276,10 +412,93 @@ function App() {
     setOutputLines([])
   }, [])
 
-  const openQuickOpen = useCallback(() => {
-    setIsQuickOpenVisible(true)
-    setIsNotificationsVisible(false)
+  const runEditorCommand = useCallback((commandId: string) => {
+    const editor = editorRef.current
+
+    if (!editor) {
+      return false
+    }
+
+    const action = editor.getAction(commandId)
+
+    if (!action?.isSupported()) {
+      return false
+    }
+
+    void action.run()
+    return true
   }, [])
+
+  const focusTerminal = useCallback(() => {
+    setBottomPanel('terminal')
+  }, [])
+
+  const menuActions = useMemo(
+    () => ({
+      openFile: () => void openFileDialog(),
+      openFolder: () => void openFolderDialog(),
+      save: saveActiveFile,
+      saveAll: saveAllFiles,
+      closeEditor: () => {
+        if (activeFileId) {
+          closeFile(activeFileId)
+        }
+      },
+      closeAllEditors: closeAllFiles,
+      quickOpen: openQuickOpen,
+      undo: () => runEditorCommand('editor.action.undo'),
+      redo: () => runEditorCommand('editor.action.redo'),
+      cut: () => runEditorCommand('editor.action.clipboardCutAction'),
+      copy: () => runEditorCommand('editor.action.clipboardCopyAction'),
+      paste: () => runEditorCommand('editor.action.clipboardPasteAction'),
+      find: () => runEditorCommand('actions.find'),
+      toggleSidebar: () => setIsSidebarCollapsed((isCollapsed) => !isCollapsed),
+      toggleSplit: toggleSplitEditor,
+      focusTerminal,
+      showExplorer: () => {
+        setActiveView('explorer')
+        setIsSidebarCollapsed(false)
+      },
+      showSearch: () => {
+        setActiveView('search')
+        setIsSidebarCollapsed(false)
+      },
+      showSettings: () => {
+        setActiveView('settings')
+        setIsSidebarCollapsed(false)
+      },
+      exit: hasNativeShell ? () => void window.myIde?.quit() : undefined,
+      newWindow: hasNativeShell ? () => void window.myIde?.newWindow() : undefined,
+      minimize: hasNativeShell ? () => void window.myIde?.minimize() : undefined,
+      toggleMaximize: hasNativeShell ? () => void window.myIde?.toggleMaximize() : undefined,
+      closeWindow: hasNativeShell ? () => void window.myIde?.closeWindow() : undefined,
+    }),
+    [
+      activeFileId,
+      closeAllFiles,
+      closeFile,
+      focusTerminal,
+      hasNativeShell,
+      openFileDialog,
+      openFolderDialog,
+      openQuickOpen,
+      runEditorCommand,
+      saveActiveFile,
+      saveAllFiles,
+      toggleSplitEditor,
+    ],
+  )
+
+  const menuState = useMemo(
+    () => ({
+      canSave: Boolean(activeFile),
+      canCloseEditor: Boolean(activeFileId),
+      isSplitEditor,
+      isSidebarCollapsed,
+      hasNativeShell,
+    }),
+    [activeFile, activeFileId, hasNativeShell, isSidebarCollapsed, isSplitEditor],
+  )
 
   const handleEditorMount = useCallback(
     (editorInstance: MonacoEditor.IStandaloneCodeEditor) => {
@@ -295,21 +514,29 @@ function App() {
   )
 
   useEffect(() => {
-    editorRef.current?.focus()
+    if (activeFileId) {
+      editorRef.current?.focus()
+    }
   }, [activeFileId])
 
   useEffect(() => {
-    if (!isAutoSaveEnabled || dirtyFiles.length === 0) {
+    if (!settings.files.autoSave || dirtyFiles.length === 0) {
       return
     }
 
     const timerId = window.setTimeout(() => {
       setSavedContent(Object.fromEntries(files.map((file) => [file.id, file.content])))
       appendOutput('success', 'Auto saved workspace')
-    }, 900)
+    }, settings.files.autoSaveDelay)
 
     return () => window.clearTimeout(timerId)
-  }, [appendOutput, dirtyFiles.length, files, isAutoSaveEnabled])
+  }, [
+    appendOutput,
+    dirtyFiles.length,
+    files,
+    settings.files.autoSave,
+    settings.files.autoSaveDelay,
+  ])
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -332,6 +559,18 @@ function App() {
         saveActiveFile()
       }
 
+      if (key === 'o') {
+        event.preventDefault()
+        void openFileDialog()
+      }
+
+      if (key === 'w') {
+        event.preventDefault()
+        if (activeFileId) {
+          closeFile(activeFileId)
+        }
+      }
+
       if (key === 'enter') {
         event.preventDefault()
         runActiveFile()
@@ -346,16 +585,76 @@ function App() {
         event.preventDefault()
         setIsSidebarCollapsed((isCollapsed) => !isCollapsed)
       }
+
+      if (key === ',') {
+        event.preventDefault()
+        setActiveView('settings')
+        setIsSidebarCollapsed(false)
+      }
     }
 
     window.addEventListener('keydown', handleKeyDown)
 
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [openQuickOpen, runActiveFile, saveActiveFile])
+  }, [activeFileId, closeFile, openFileDialog, openQuickOpen, runActiveFile, saveActiveFile])
+
+  const toggleFolderExpanded = useCallback((folderPath: string) => {
+    setExpandedFolders((current) => {
+      const next = new Set(current)
+
+      if (next.has(folderPath)) {
+        next.delete(folderPath)
+      } else {
+        next.add(folderPath)
+      }
+
+      return next
+    })
+  }, [])
 
   function selectActivity(view: ActivityView) {
     setActiveView(view)
     setIsSidebarCollapsed(false)
+  }
+
+  function renderFileTree(nodes: FileTreeNode[], depth = 0) {
+    return nodes.map((node) => {
+      if (node.type === 'folder') {
+        const isExpanded = expandedFolders.has(node.path)
+
+        return (
+          <div className="tree-folder" key={node.path || `folder-${node.name}`}>
+            <button
+              className="tree-row folder-row"
+              onClick={() => toggleFolderExpanded(node.path)}
+              style={{ paddingLeft: `${8 + depth * 14}px` }}
+              type="button"
+            >
+              {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+              <Folder size={16} />
+              <span>{node.name}</span>
+            </button>
+            {isExpanded && (
+              <div className="tree-children">{renderFileTree(node.children, depth + 1)}</div>
+            )}
+          </div>
+        )
+      }
+
+      return (
+        <button
+          className={`file-item tree-file ${activeFile?.id === node.fileId ? 'active' : ''}`}
+          key={node.fileId}
+          onClick={() => openFile(node.fileId)}
+          style={{ paddingLeft: `${22 + depth * 14}px` }}
+          type="button"
+        >
+          <FileCode2 size={16} />
+          <span>{node.name}</span>
+          {dirtyFileIds.has(node.fileId) && <i aria-label="Unsaved" />}
+        </button>
+      )
+    })
   }
 
   function renderSidebarContent() {
@@ -376,7 +675,7 @@ function App() {
           <div className="file-list">
             {searchResults.map((file) => (
               <button
-                className={`file-item ${activeFile.id === file.id ? 'active' : ''}`}
+                className={`file-item ${activeFile?.id === file.id ? 'active' : ''}`}
                 key={file.id}
                 onClick={() => openFile(file.id)}
                 type="button"
@@ -394,7 +693,7 @@ function App() {
     if (activeView === 'run') {
       return (
         <section className="sidebar-panel">
-          <button className="primary-action" onClick={runActiveFile} type="button">
+          <button className="primary-action" disabled={!activeFile} onClick={runActiveFile} type="button">
             <Play size={16} />
             Run current file
           </button>
@@ -404,7 +703,7 @@ function App() {
           </button>
           <div className="panel-card">
             <span>Current target</span>
-            <strong>{activeFile.path}</strong>
+            <strong>{activeFile?.path ?? 'No file open'}</strong>
           </div>
         </section>
       )
@@ -426,7 +725,7 @@ function App() {
           <div className="file-list">
             {(dirtyFiles.length > 0 ? dirtyFiles : files).map((file) => (
               <button
-                className={`file-item ${activeFile.id === file.id ? 'active' : ''}`}
+                className={`file-item ${activeFile?.id === file.id ? 'active' : ''}`}
                 key={file.id}
                 onClick={() => openFile(file.id)}
                 type="button"
@@ -443,48 +742,21 @@ function App() {
 
     if (activeView === 'settings') {
       return (
-        <section className="sidebar-panel">
-          <label className="setting-row">
-            <span>Minimap</span>
-            <input
-              checked={isMinimapEnabled}
-              onChange={(event) => setIsMinimapEnabled(event.target.checked)}
-              type="checkbox"
-            />
-          </label>
-          <label className="setting-row">
-            <span>Word wrap</span>
-            <input
-              checked={isWordWrapEnabled}
-              onChange={(event) => setIsWordWrapEnabled(event.target.checked)}
-              type="checkbox"
-            />
-          </label>
-          <label className="setting-row">
-            <span>Auto save</span>
-            <input
-              checked={isAutoSaveEnabled}
-              onChange={(event) => setIsAutoSaveEnabled(event.target.checked)}
-              type="checkbox"
-            />
-          </label>
-          <div className="stepper-row">
-            <span>Font size</span>
-            <div>
+        <section className="sidebar-panel settings-sidebar">
+          <div className="settings-sidebar-intro">
+            Open the settings editor to customize My IDE.
+          </div>
+          <div className="settings-sidebar-nav">
+            {(Object.keys(settingsCategoryLabels) as SettingsCategory[]).map((category) => (
               <button
-                onClick={() => setFontSize((size) => Math.max(11, size - 1))}
+                className={settingsCategory === category ? 'active' : ''}
+                key={category}
+                onClick={() => setSettingsCategory(category)}
                 type="button"
               >
-                −
+                {settingsCategoryLabels[category]}
               </button>
-              <strong>{fontSize}</strong>
-              <button
-                onClick={() => setFontSize((size) => Math.min(20, size + 1))}
-                type="button"
-              >
-                +
-              </button>
-            </div>
+            ))}
           </div>
         </section>
       )
@@ -492,20 +764,27 @@ function App() {
 
     return (
       <section className="workspace">
-        <div className="workspace-title">MY-IDE</div>
-        <div className="file-list">
-          {files.map((file) => (
-            <button
-              className={`file-item ${activeFile.id === file.id ? 'active' : ''}`}
-              key={file.id}
-              onClick={() => openFile(file.id)}
-              type="button"
-            >
-              <FileCode2 size={16} />
-              <span>{file.name}</span>
-              {dirtyFileIds.has(file.id) && <i aria-label="Unsaved" />}
+        <div className="workspace-title">{workspaceName.toUpperCase()}</div>
+        {workspaceFolder && (
+          <div className="workspace-actions">
+            <button onClick={() => void openFolderDialog()} type="button">
+              <FolderOpen size={14} />
+              Change folder
             </button>
-          ))}
+          </div>
+        )}
+        <div className="file-list file-tree">
+          {files.length > 0 ? (
+            renderFileTree(fileTree)
+          ) : (
+            <div className="explorer-empty">
+              <p>No folder opened</p>
+              <button onClick={() => void openFolderDialog()} type="button">
+                <FolderOpen size={14} />
+                Open Folder
+              </button>
+            </div>
+          )}
         </div>
       </section>
     )
@@ -513,6 +792,8 @@ function App() {
 
   return (
     <main className={`ide-shell ${isSidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
+      <MenuBar actions={menuActions} state={menuState} />
+
       <aside className="activity-bar" aria-label="Primary navigation">
         <button
           className={`activity-button ${activeView === 'explorer' ? 'active' : ''}`}
@@ -571,7 +852,7 @@ function App() {
         {renderSidebarContent()}
       </aside>
 
-      <section className="workbench">
+      <section className={workbenchClassName} style={{ gridTemplateRows: workbenchGridRows }}>
         <header className="titlebar">
           <button
             className="project-mark"
@@ -580,12 +861,28 @@ function App() {
             title="Toggle sidebar"
           >
             <Code2 size={18} />
-            <span>My IDE</span>
+            <span>{workspaceName}</span>
           </button>
           <button className="command-center" onClick={openQuickOpen} type="button">
-            my-ide / {activeFile.path}
+            {activeFile ? `${workspaceName} / ${activeFile.path}` : workspaceName}
           </button>
           <div className="window-actions">
+            <button
+              disabled={!activeFile}
+              onClick={saveActiveFile}
+              type="button"
+              title="Save (Ctrl+S)"
+            >
+              <Check size={17} />
+            </button>
+            <button
+              disabled={!activeFile}
+              onClick={runActiveFile}
+              type="button"
+              title="Run (Ctrl+Enter)"
+            >
+              <Play size={17} />
+            </button>
             <button
               className={isSplitEditor ? 'active' : ''}
               onClick={toggleSplitEditor}
@@ -601,7 +898,7 @@ function App() {
               title="Notifications"
             >
               <Bell size={17} />
-              {dirtyFiles.length > 0 && <i />}
+              {dirtyFiles.length > 0 && <i aria-label="Unsaved changes" />}
             </button>
           </div>
           {isNotificationsVisible && (
@@ -625,92 +922,112 @@ function App() {
           )}
         </header>
 
-        <div className="tabs">
-          {activeOpenFiles.map((file) => (
-            <div
-              className={`tab ${activeFile.id === file.id ? 'active' : ''}`}
-              key={file.id}
+        {hasOpenFiles && (
+          <div className="tabs">
+            {activeOpenFiles.map((file) => (
+              <div
+                className={`tab ${activeFile?.id === file.id ? 'active' : ''}`}
+                key={file.id}
+              >
+                <button
+                  className="tab-main"
+                  onClick={() => openFile(file.id)}
+                  type="button"
+                >
+                  <FileCode2 size={14} />
+                  <span>{file.name}</span>
+                  {dirtyFileIds.has(file.id) && <i />}
+                </button>
+                <button
+                  className="close-tab"
+                  onClick={() => closeFile(file.id)}
+                  type="button"
+                  title="Close"
+                >
+                  <X size={13} />
+                </button>
+              </div>
+            ))}
+            <button
+              className="close-all-tabs"
+              onClick={closeAllFiles}
+              type="button"
+              title="Close all editors"
             >
-              <button
-                className="tab-main"
-                onClick={() => openFile(file.id)}
-                type="button"
-              >
-                <FileCode2 size={14} />
-                <span>{file.name}</span>
-                {dirtyFileIds.has(file.id) && <i />}
-              </button>
-              <button
-                className="close-tab"
-                onClick={() => closeFile(file.id)}
-                type="button"
-                title="Close"
-              >
-                <X size={13} />
-              </button>
-            </div>
-          ))}
-        </div>
+              <X size={14} />
+            </button>
+          </div>
+        )}
 
         <div className="editor-layout">
-          <div className="editor-toolbar">
-            <div>
-              <span>{activeFile.path}</span>
-              {dirtyFileIds.has(activeFile.id) && <strong>Unsaved</strong>}
-            </div>
-            <div className="editor-actions">
-              <button onClick={saveActiveFile} type="button" title="Save">
-                <Check size={16} />
-                Save
-              </button>
-              <button onClick={runActiveFile} type="button" title="Run file">
-                <Play size={16} />
-                Run
-              </button>
-            </div>
-          </div>
-
-          <div className={`editor-pane ${isSplitEditor ? 'split' : ''}`}>
-            <Editor
-              height="100%"
-              language={activeFile.language}
-              onChange={updateActiveFile}
-              onMount={handleEditorMount}
-              path={activeFile.path}
-              theme="vs-dark"
-              value={activeFile.content}
-              options={{
-                fontFamily: 'JetBrains Mono, Consolas, monospace',
-                fontSize,
-                minimap: { enabled: isMinimapEnabled },
-                padding: { top: 18, bottom: 18 },
-                smoothScrolling: true,
-                tabSize: 2,
-                wordWrap: isWordWrapEnabled ? 'on' : 'off',
-              }}
+          {isSettingsOpen ? (
+            <SettingsView
+              category={settingsCategory}
+              onCategoryChange={setSettingsCategory}
+              onResetAll={resetSettings}
+              onResetCategory={resetCategory}
+              onUpdate={updateSetting}
+              settings={settings}
             />
-            {isSplitEditor && (
+          ) : hasOpenFiles && activeFile ? (
+            <div className={`editor-pane ${isSplitEditor ? 'split' : ''}`}>
               <Editor
                 height="100%"
                 language={activeFile.language}
-                path={`${activeFile.path}:preview`}
-                theme="vs-dark"
+                onChange={updateActiveFile}
+                onMount={handleEditorMount}
+                path={activeFile.path}
+                theme={settings.editor.theme}
                 value={activeFile.content}
-                options={{
-                  fontFamily: 'JetBrains Mono, Consolas, monospace',
-                  fontSize,
-                  minimap: { enabled: false },
-                  padding: { top: 18, bottom: 18 },
-                  readOnly: true,
-                  smoothScrolling: true,
-                  tabSize: 2,
-                  wordWrap: isWordWrapEnabled ? 'on' : 'off',
-                }}
+                options={editorOptions}
               />
-            )}
-          </div>
+              {isSplitEditor && (
+                <Editor
+                  height="100%"
+                  language={activeFile.language}
+                  path={`${activeFile.path}:preview`}
+                  theme={settings.editor.theme}
+                  value={activeFile.content}
+                  options={{
+                    ...editorOptions,
+                    minimap: { enabled: false },
+                    readOnly: true,
+                  }}
+                />
+              )}
+            </div>
+          ) : (
+            <section className="welcome-screen">
+              <div className="welcome-content">
+                <Code2 className="welcome-logo" size={72} strokeWidth={1.5} />
+                <h1>My IDE</h1>
+                <p>Open a folder or file to start editing.</p>
+                <div className="welcome-actions">
+                  <button onClick={() => void openFolderDialog()} type="button">
+                    <FolderOpen size={18} />
+                    Open Folder
+                  </button>
+                  <button onClick={() => void openFileDialog()} type="button">
+                    <FileCode2 size={18} />
+                    Open File
+                  </button>
+                  <button onClick={openQuickOpen} type="button">
+                    <Search size={18} />
+                    Quick Open
+                  </button>
+                </div>
+                <div className="welcome-shortcuts">
+                  <span>Ctrl+O open file</span>
+                  <span>Ctrl+P quick open</span>
+                  <span>Ctrl+W close tab</span>
+                  <span>Ctrl+S save</span>
+                </div>
+              </div>
+            </section>
+          )}
         </div>
 
+        {settings.workbench.showBottomPanel && (
         <section className="panel">
           <div className="panel-tabs">
             <button
@@ -763,18 +1080,23 @@ function App() {
             )}
           </div>
         </section>
+        )}
 
+        {settings.workbench.showStatusBar && (
         <footer className="statusbar">
           <span>
             <GitBranch size={14} />
             main
           </span>
-          <span>{activeFile.language}</span>
+          <span>{activeFile?.language ?? 'Plain Text'}</span>
           <span>
-            Ln {cursorPosition.line}, Col {cursorPosition.column}
+            {activeFile
+              ? `Ln ${cursorPosition.line}, Col ${cursorPosition.column}`
+              : 'No editor open'}
           </span>
           <span>{dirtyFileIds.size} unsaved</span>
         </footer>
+        )}
       </section>
 
       {isSidebarCollapsed && (
@@ -815,7 +1137,7 @@ function App() {
             <div className="quick-open-results">
               {quickOpenFiles.map((file) => (
                 <button
-                  className={activeFile.id === file.id ? 'active' : ''}
+                  className={activeFile?.id === file.id ? 'active' : ''}
                   key={file.id}
                   onClick={() => openFile(file.id)}
                   type="button"
